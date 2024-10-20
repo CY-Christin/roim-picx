@@ -44,6 +44,50 @@ router.post('/checkToken', async (req: Request, env: Env) => {
     return json(Ok(true))
 })
 
+// // list image
+// router.post('/list', auth, async (req: Request, env: Env) => {
+//     const data = await req.json() as ImgReq
+//     if (!data.limit) {
+//         data.limit = 10
+//     }
+//     if (data.limit > 100) {
+//         data.limit = 100
+//     }
+//     if (!data.delimiter) {
+//         data.delimiter = "/"
+//     }
+//     let include = undefined
+//     if (data.delimiter != "/") {
+//         include = data.delimiter
+//     }
+//     // console.log(include)
+//     const options = <R2ListOptions>{
+//         limit: data.limit,
+//         cursor: data.cursor,
+//         delimiter: data.delimiter,
+//         prefix: include
+//     }
+//     const list = await env.R2.list(options)
+//     // console.log(list)
+//     const truncated = list.truncated ? list.truncated : false
+//     const cursor = list.cursor
+//     const objs = list.objects
+//     const urls = objs.map(it => {
+//         return <ImgItem>{
+//             url: `/rest/${it.key}`,
+//             copyUrl: `${env.COPY_URL}/${it.key}`,
+//             key: it.key,
+//             size: it.size
+//         }
+//     })
+//     return json(Ok(<ImgList>{
+//         list: urls,
+//         next: truncated,
+//         cursor: cursor,
+//         prefixes: list.delimitedPrefixes
+//     }))
+// })
+
 // list image
 router.post('/list', auth, async (req: Request, env: Env) => {
     const data = await req.json() as ImgReq
@@ -56,11 +100,23 @@ router.post('/list', auth, async (req: Request, env: Env) => {
     if (!data.delimiter) {
         data.delimiter = "/"
     }
+    data.page = data.page || 1
+
     let include = undefined
     if (data.delimiter != "/") {
         include = data.delimiter
     }
-    // console.log(include)
+
+    // Get total count of items
+    const totalItems = await getTotalItemCount(env.R2, include)
+    const totalPages = Math.ceil(totalItems / data.limit)
+
+    // Calculate the cursor based on the requested page
+    if (data.page > 1 && !data.cursor) {
+        const skipItems = (data.page - 1) * data.limit
+        data.cursor = await getPageCursor(env.R2, skipItems, include)
+    }
+
     const options = <R2ListOptions>{
         limit: data.limit,
         cursor: data.cursor,
@@ -68,7 +124,6 @@ router.post('/list', auth, async (req: Request, env: Env) => {
         prefix: include
     }
     const list = await env.R2.list(options)
-    // console.log(list)
     const truncated = list.truncated ? list.truncated : false
     const cursor = list.cursor
     const objs = list.objects
@@ -84,9 +139,40 @@ router.post('/list', auth, async (req: Request, env: Env) => {
         list: urls,
         next: truncated,
         cursor: cursor,
-        prefixes: list.delimitedPrefixes
+        prefixes: list.delimitedPrefixes,
+        totalItems,
+        currentPage: data.page,
+        totalPages
     }))
 })
+
+async function getTotalItemCount(bucket: R2Bucket, prefix?: string): Promise<number> {
+    let count = 0
+    let cursor: string | undefined
+
+    do {
+        const list = await bucket.list({ cursor, limit: 1000, prefix })
+        count += list.objects.length
+        cursor = list.cursor
+    } while (cursor)
+
+    return count
+}
+
+async function getPageCursor(bucket: R2Bucket, skipItems: number, prefix?: string): Promise<string | undefined> {
+    let cursor: string | undefined
+    let itemsSkipped = 0
+
+    while (itemsSkipped < skipItems) {
+        const list = await bucket.list({ cursor, limit: Math.min(1000, skipItems - itemsSkipped), prefix })
+        itemsSkipped += list.objects.length
+        cursor = list.cursor
+
+        if (!cursor) break // 如果没有更多项目，提前退出
+    }
+
+    return cursor
+}
 
 // batch upload file
 router.post('/upload', auth, async (req: Request, env: Env) => {
